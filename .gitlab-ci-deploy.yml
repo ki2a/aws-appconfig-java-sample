@@ -1,0 +1,51 @@
+stages:
+  - deploy
+  - verify
+
+variables:
+  AWS_REGION: us-east-1
+  ECS_CLUSTER: poc-migration-cluster
+  ECS_SERVICE: al2023-application-svc
+  ECR_REPOSITORY: al2023-application
+  CONTAINER_NAME: al2023-application
+  TASK_DEFINITION: al2023-application-task
+
+deploy-ecs:
+  stage: deploy
+  image: amazon/aws-cli:latest
+  environment:
+    name: production
+  only:
+    - main
+  script:
+    - |
+      # Get current task definition
+      TASK_DEF=$(aws ecs describe-task-definition --task-definition $TASK_DEFINITION --query taskDefinition)
+
+      # Update image in task definition
+      NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "$ECR_REGISTRY/$ECR_REPOSITORY:$CI_COMMIT_SHA" \
+        '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn) | del(.revision) | del(.status) | del(.requiresAttributes) | del(.compatibilities) | del(.registeredAt) | del(.registeredBy)')
+
+      # Register new task definition
+      NEW_TASK_ARN=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEF" --query taskDefinition.taskDefinitionArn --output text)
+
+      # Update service
+      aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --task-definition $NEW_TASK_ARN --force-new-deployment
+
+      # Wait for stability
+      aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE
+
+smoke-test:
+  stage: verify
+  image: curlimages/curl:latest
+  only:
+    - main
+  script:
+    - sleep 30
+    - |
+      RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+      if [ "$RESPONSE" != "200" ]; then
+        echo "Health check failed: $RESPONSE"
+        exit 1
+      fi
+      echo "Health check passed"
